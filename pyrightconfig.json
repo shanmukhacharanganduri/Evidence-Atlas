@@ -1,0 +1,11 @@
+{
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/__pycache__"
+  ],
+  "extraPaths": [
+    "C:\\Users\\Shanmukha\\AppData\\Roaming\\Python\\Python314\\site-packages"
+  ]
+}

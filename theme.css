@@ -1,0 +1,59 @@
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=Geist:wght@400;500;600;700&display=swap');
+
+:root {
+  --paper: #F7F5F0; --ink: #20201E; --muted: #62615c; --rule: #cac7be;
+  --accent: #245847; --accent-ink: #fff; --wash: #ece9e0; --notice: #e7efe9;
+  --warning: #6b4812; --danger: #8a2c21; --focus: #0b65c2;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper:#191B1A; --ink:#EEEDE7; --muted:#b8b8b0; --rule:#4a4d49; --accent:#9BC7AF; --accent-ink:#10231a; --wash:#242725; --notice:#1d3027; --warning:#f3ce85; --danger:#f3afa7; --focus:#92caff; color-scheme:dark; }
+}
+/* Streamlit marks the selection in a harmless element; explicit preference is applied below. */
+:has(.theme-flag[data-theme-choice="light"]) { --paper:#F7F5F0; --ink:#20201E; --muted:#62615c; --rule:#cac7be; --accent:#245847; --accent-ink:#fff; --wash:#ece9e0; --notice:#e7efe9; --warning:#6b4812; --danger:#8a2c21; --focus:#0b65c2; color-scheme:light; }
+:has(.theme-flag[data-theme-choice="dark"]) { --paper:#191B1A; --ink:#EEEDE7; --muted:#b8b8b0; --rule:#4a4d49; --accent:#9BC7AF; --accent-ink:#10231a; --wash:#242725; --notice:#1d3027; --warning:#f3ce85; --danger:#f3afa7; --focus:#92caff; color-scheme:dark; }
+
+html, body, [class*="css"] { background:var(--paper)!important; color:var(--ink)!important; font-family:Geist, ui-sans-serif, system-ui, sans-serif; }
+.stApp { background:var(--paper)!important; }
+#MainMenu, footer, header[data-testid="stHeader"] { visibility:hidden; }
+.block-container { max-width:1400px; padding:2.1rem 4.5vw 5rem!important; }
+.masthead { border-bottom:2px solid var(--ink); padding:0 0 1rem; display:flex; justify-content:space-between; gap:2rem; }
+.wordmark, h1, h2, .answer-copy, .question-headline { font-family:"Source Serif 4", Georgia, serif; }
+.wordmark { font-size:2.15rem; letter-spacing:-.04em; line-height:1; font-weight:700; }
+.masthead p { color:var(--muted); font-size:.9rem; margin:.5rem 0 0; }
+.stTabs [data-baseweb="tab-list"] { gap:1.25rem; border-bottom:1px solid var(--rule); margin:1.35rem 0 2rem; }
+.stTabs [data-baseweb="tab"] { font-size:.77rem; letter-spacing:.08em; text-transform:uppercase; padding:.6rem 0 .75rem; color:var(--muted); }
+.stTabs [aria-selected="true"] { color:var(--ink)!important; border-bottom:2px solid var(--accent)!important; }
+.section-rule, .article-rule { border-top:1px solid var(--rule); margin:0 0 1.4rem; }
+.article-rule { margin-top:2.75rem; }
+.kicker, .reference, .citation-line, .evidence-meta { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.71rem; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); }
+h1 { font-size:clamp(2.1rem, 5vw, 4.15rem); line-height:1.02; letter-spacing:-.045em; max-width:17ch; margin:.15rem 0 .85rem; }
+h2 { font-size:1.35rem; line-height:1.15; letter-spacing:-.02em; margin:.2rem 0 .6rem; }
+.lede { max-width:66ch; font-family:"Source Serif 4", Georgia, serif; font-size:1.18rem; line-height:1.55; color:var(--muted); margin-bottom:2rem; }
+.question-headline { max-width:21ch; font-size:clamp(2rem, 4vw, 3.5rem); }
+label, .stTextInput label { font-weight:700!important; color:var(--ink)!important; font-size:.9rem!important; }
+.stTextInput input { background:var(--paper)!important; color:var(--ink)!important; border:1px solid var(--ink)!important; border-radius:0!important; font-size:1.05rem!important; min-height:3.5rem!important; padding-right:4.5rem!important; }
+.stTextInput input:focus, button:focus-visible, [role="tab"]:focus-visible { outline:3px solid var(--focus)!important; outline-offset:3px!important; box-shadow:none!important; }
+.stButton button, .stFormSubmitButton button { border-radius:0!important; min-height:2.75rem!important; font-weight:700!important; border:1px solid var(--ink)!important; }
+.stFormSubmitButton button { background:var(--accent)!important; color:var(--accent-ink)!important; padding:0 1.15rem!important; }
+.answer-copy { max-width:40em; font-size:1.18rem; line-height:1.65; }
+.answer-copy p { margin-top:0; }
+.citation-line { border-top:1px solid var(--rule); border-bottom:1px solid var(--rule); padding:.7rem 0; color:var(--accent); font-weight:700; }
+.evidence-card { border-top:1px solid var(--ink); padding:1rem 0 .85rem; }
+.evidence-card:last-of-type { border-bottom:1px solid var(--rule); }
+.evidence-meta { display:flex; justify-content:space-between; gap:1rem; }
+.evidence-card p { font-family:"Source Serif 4", Georgia, serif; font-size:1rem; line-height:1.55; margin:.65rem 0 0; }
+mark { background:transparent; color:inherit; text-decoration:underline 2px var(--accent); text-underline-offset:3px; }
+.notice { border-left:5px solid var(--accent); border-top:1px solid var(--rule); border-bottom:1px solid var(--rule); background:var(--notice); padding:1rem 1.1rem; margin:1.5rem 0; }
+.notice h2 { font-family:Geist, sans-serif; font-size:.84rem; text-transform:uppercase; letter-spacing:.04em; margin:0 0 .45rem; }
+.notice p { line-height:1.55; margin:0; }
+.notice.unable { border-left-color:var(--danger); background:transparent; }
+.notice.limitation { border-left-color:var(--warning); background:transparent; }
+.initial-state { border-top:1px solid var(--rule); border-bottom:1px solid var(--rule); max-width:760px; padding:2rem 0; margin-top:2.75rem; }
+.initial-state p:not(.kicker) { max-width:55ch; font-family:"Source Serif 4", Georgia, serif; font-size:1.1rem; line-height:1.55; }
+.document-viewer { border-top:2px solid var(--ink); margin-top:3rem; padding-top:1rem; }
+.document-viewer h2 { overflow-wrap:anywhere; }
+.stDataFrame { border:1px solid var(--rule); }
+[data-testid="stAlert"] { border-radius:0!important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; transition-duration:.01ms!important; } }
+@media (max-width: 700px) { .block-container { padding:1.25rem 1.1rem 3rem!important; } .masthead { display:block; } .wordmark { font-size:1.8rem; } h1 { font-size:2.45rem; } .lede { font-size:1.08rem; } .stTabs [data-baseweb="tab-list"] { gap:.8rem; overflow-x:auto; } .stTabs [data-baseweb="tab"] { font-size:.68rem; } .evidence-meta { display:block; } .evidence-meta span { display:block; margin:.2rem 0; } }
