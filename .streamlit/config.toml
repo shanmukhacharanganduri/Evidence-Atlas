@@ -4,10 +4,16 @@ gatherUsageStats = false
 [server]
 headless = true
 
-[theme]
-base = "dark"
-primaryColor = "#c5a059"
-backgroundColor = "#14161a"
-secondaryBackgroundColor = "#1b1f27"
-textColor = "#eceae5"
-font = "sans serif"
+# Single authority for the colour palette. app.py mirrors these values for its own components
+# (tests/test_theme.py fails if they drift). Streamlit follows the system/Settings light-dark choice.
+[theme.light]
+primaryColor = "#245847"
+backgroundColor = "#F7F5F0"
+secondaryBackgroundColor = "#ECE9E0"
+textColor = "#20201E"
+
+[theme.dark]
+primaryColor = "#9BC7AF"
+backgroundColor = "#191B1A"
+secondaryBackgroundColor = "#242725"
+textColor = "#EEEDE7"

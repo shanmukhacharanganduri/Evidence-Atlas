@@ -1,205 +1,311 @@
 # -*- coding: utf-8 -*-
-"""Evidence Atlas — editorial accreditation evidence workspace."""
+"""Evidence Atlas — accreditation evidence workspace.
+
+Retrieval runs only on an explicit question submission, and its structured result is kept in
+session state. Appearance, filter, source-viewer and download actions never call the backend.
+"""
 from __future__ import annotations
 
 import hashlib
 import html
-import json
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from evaluate import BENCHMARK, run_evaluation
-from rag_pipeline import ACCREDITATION_CRITERIA, NO_EVIDENCE_RESPONSE, build_rag, tokens
+from answering import tokens
+from rag_pipeline import ALL_INSTITUTIONS, DEFAULT_METHOD, ACCREDITATION_CRITERIA, build_rag, corpus_stamp
 
 st.set_page_config(page_title="Evidence Atlas", layout="wide", initial_sidebar_state="collapsed")
 
-THEME = Path(__file__).resolve().parent / "theme.css"
-if THEME.exists():
-    st.markdown(f"<style>{THEME.read_text('utf-8')}</style>", unsafe_allow_html=True)
+def inject_theme() -> None:
+    """Colour tokens live in theme.css (light-dark()), so they track Streamlit's native theme without a rerun."""
+    css = (Path(__file__).resolve().parent / "theme.css").read_text("utf-8")
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
-@st.cache_resource(show_spinner="Indexing the evidence corpus…")
-def get_rag():
+@st.cache_resource(show_spinner=False)
+def get_rag(stamp: str):
     return build_rag()
 
 
-@st.cache_data(show_spinner="Evaluating corpus coverage…")
-def get_coverage(_rag):
-    return _rag.criterion_coverage()
+@st.cache_data(show_spinner=False, max_entries=64)
+def render_page(_rag, version: str, source: str, page: int, terms: tuple[str, ...]) -> bytes:
+    return _rag.render_cited_page(source, page, list(terms))
 
 
-def _anchor(source: str, page: int) -> str:
-    return f"evidence-{hashlib.sha256(f'{source}|{page}'.encode()).hexdigest()[:12]}"
+@st.cache_data(show_spinner=False, max_entries=64)
+def page_text(_rag, version: str, source: str, page: int) -> str:
+    return _rag.page_text(source, page)
 
 
-def _short(value: str, length: int = 54) -> str:
+@st.cache_data(show_spinner=False, max_entries=32)
+def review_alerts(_rag, version: str, scope: str) -> list[dict]:
+    return _rag.governance_gaps(scope)
+
+
+def short(value: str, length: int = 54) -> str:
     return value if len(value) <= length else value[: length - 1] + "…"
 
 
-def _highlight(text: str, query: str) -> str:
+def highlight(text: str, query: str) -> str:
     output = html.escape(text)
-    terms = sorted({term for term in tokens(query) if len(term) > 3}, key=len, reverse=True)
+    terms = sorted({t for t in tokens(query) if len(t) > 3}, key=len, reverse=True)
     if terms:
         output = re.sub("(" + "|".join(map(re.escape, terms)) + ")", r"<mark>\1</mark>", output, flags=re.I)
     return output
 
 
-def install_following_magnifier() -> None:
-    """Attach a decorative, measured magnifier to Streamlit's native text input."""
-    st.html(
-        """
-        <script>
-        (() => {
-          const root = window.parent.document;
-          const input = [...root.querySelectorAll('input')].find((el) => el.getAttribute('aria-label') === 'Ask a question about the corpus');
-          if (!input || root.getElementById('atlas-following-search')) return;
-          const icon = root.createElement('span');
-          icon.id = 'atlas-following-search'; icon.setAttribute('aria-hidden', 'true');
-          icon.innerHTML = '&#128269;'; icon.style.cssText = 'position:fixed;z-index:1000;pointer-events:none;font-size:15px;line-height:1;color:#245847;transition:left 125ms linear,top 125ms linear;';
-          root.body.appendChild(icon);
-          const canvas = root.createElement('canvas'); const context = canvas.getContext('2d');
-          const update = () => {
-            const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-            icon.style.transition = reduced ? 'none' : 'left 125ms linear,top 125ms linear';
-            const style = window.getComputedStyle(input); context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-            const beforeCaret = input.value.slice(0, input.selectionStart ?? input.value.length);
-            const width = context.measureText(beforeCaret).width;
-            const rect = input.getBoundingClientRect(); const pad = parseFloat(style.paddingLeft) || 16;
-            const minimum = rect.left + 34; const maximum = rect.right - 58;
-            const left = Math.max(minimum, Math.min(rect.left + pad + width - input.scrollLeft + 8, maximum));
-            icon.style.left = `${left}px`; icon.style.top = `${rect.top + (rect.height - 16) / 2}px`;
-          };
-          ['input','keyup','click','focus','scroll'].forEach((event) => input.addEventListener(event, update));
-          new ResizeObserver(update).observe(input); root.fonts?.ready.then(update); update();
-        })();
-        </script>
-        """,
-    )
+# ---------------------------------------------------------------- source viewer
+
+def request_viewer(source: str, page: int, terms: list[str]) -> None:
+    """Button callback: runs before the next render, so no explicit rerun is needed."""
+    st.session_state["open_viewer"] = {"source": source, "page": page, "terms": tuple(terms)}
 
 
-def evidence_card(result, query: str) -> None:
-    source, page = result.chunk.source, result.chunk.page
-    st.markdown(
-        f'<article class="evidence-card" id="{_anchor(source, page)}">'
-        f'<div class="evidence-meta"><span>{html.escape(_short(source))}</span><span>PAGE {page}</span></div>'
-        f'<p>{_highlight(result.chunk.text, query)}</p></article>',
-        unsafe_allow_html=True,
-    )
-    key = hashlib.sha256(f"{source}|{page}|{result.chunk.text}".encode()).hexdigest()[:16]
-    if st.button("Open source page", key=f"source_{key}"):
-        st.session_state["pdf_viewer"] = {"source": source, "page": page, "terms": tokens(query)}
-        st.rerun()
-
-
-def show_viewer(rag) -> None:
-    viewer = st.session_state.get("pdf_viewer")
-    if not viewer:
+@st.dialog("Source page", width="large")
+def source_dialog(rag, source: str, page: int, terms: tuple[str, ...]) -> None:
+    key = "viewer_page"
+    st.session_state.setdefault(key, page)
+    try:
+        total = rag.page_count(source)
+    except FileNotFoundError:
+        st.error("This source file is no longer in the corpus folder. Rescan the corpus from the Corpus tab.")
         return
-    st.markdown('<section class="document-viewer"><div class="kicker">Selected evidence</div>'
-                f'<h2>{html.escape(viewer["source"])}</h2><p class="reference">PAGE {viewer["page"]} · original rendering</p></section>', unsafe_allow_html=True)
-    left, right = st.columns([5, 1])
-    with right:
-        if st.button("Close document"):
-            del st.session_state["pdf_viewer"]
-            st.rerun()
-    with left:
-        try:
-            image = rag.render_cited_page(viewer["source"], viewer["page"], viewer.get("terms", []))
-            st.image(image, width="stretch", caption="Highlighted terms locate the supporting passage; the scan itself is not recolored.")
-        except FileNotFoundError:
-            st.error("Unable to open this source file. It may have been moved from the corpus.")
-        except Exception as error:
-            st.error(f"Unable to render the selected page: {error}")
+    except Exception as error:
+        st.error(f"Unable to open this source file: {error}")
+        return
+    current = min(max(1, st.session_state[key]), total)
+    st.markdown(f'<div class="atlas"><h2>{html.escape(source)}</h2><p class="reference">PAGE {current} OF {total}</p></div>', unsafe_allow_html=True)
+    prev_col, next_col, download_col = st.columns([1, 1, 2])
+    if prev_col.button("Previous page", disabled=current <= 1, key="viewer_prev"):
+        st.session_state[key] = current - 1
+        st.rerun(scope="fragment")
+    if next_col.button("Next page", disabled=current >= total, key="viewer_next"):
+        st.session_state[key] = current + 1
+        st.rerun(scope="fragment")
+    download_col.download_button("Download original PDF", rag.source_bytes(source), file_name=Path(source).name,
+                                 mime="application/pdf", key="viewer_download")
+    try:
+        st.image(render_page(rag, rag.index_version, source, current, terms), width="stretch",
+                 caption=f"{source}, page {current}. Highlighted terms locate the supporting passage.")
+    except Exception as error:
+        st.error(f"Unable to render the selected page: {error}")
+    with st.expander("Page text (selectable, screen-reader friendly)"):
+        text = page_text(rag, rag.index_version, source, current)
+        st.text(text.strip() or "No extractable text on this page (it may be a scan).")
 
 
-rag = get_rag()
-sources = sorted({chunk.source for chunk in rag.chunks})
+# ---------------------------------------------------------------- search tab
 
-st.markdown('<header class="masthead"><div><div class="wordmark">Evidence Atlas</div><p>Accreditation evidence workspace for reviewers and IQAC staff</p></div></header>', unsafe_allow_html=True)
-nav, appearance = st.columns([5, 2])
-with nav:
-    st.caption("SEARCH · COVERAGE · EVALUATION · CORPUS")
-with appearance:
-    saved_theme = st.query_params.get("theme", "System").title()
-    theme_options = ["System", "Light", "Dark"]
-    theme_choice = st.selectbox("Appearance", theme_options, index=theme_options.index(saved_theme) if saved_theme in theme_options else 0, key="appearance", label_visibility="collapsed")
-if theme_choice == "System":
-    if "theme" in st.query_params:
-        del st.query_params["theme"]
-else:
-    st.query_params["theme"] = theme_choice.lower()
-st.markdown(f'<div class="theme-flag" data-theme-choice="{theme_choice.lower()}"></div>', unsafe_allow_html=True)
+def submit_question() -> None:
+    question = st.session_state.get("question", "").strip()
+    if not question:
+        st.session_state["form_message"] = "Enter a question to search the records."
+        return
+    st.session_state["form_message"] = ""
+    st.session_state["pending_query"] = {"query": question, "scope": st.session_state.get("scope", ALL_INSTITUTIONS)}
 
-search_tab, coverage_tab, evaluation_tab, corpus_tab = st.tabs(["Search", "Coverage", "Evaluation", "Corpus"])
 
-with search_tab:
-    st.markdown('<div class="section-rule"></div><p class="kicker">Ask the corpus</p><h1>Find evidence, not just documents.</h1><p class="lede">Ask about SSR, AQAR, IQAC minutes, NIRF, NBA, and the records supplied to this workspace.</p>', unsafe_allow_html=True)
+def clear_result() -> None:
+    for key in ("result", "pending_query", "question", "form_message"):
+        st.session_state.pop(key, None)
+
+
+def evidence_card(item, query: str, label: str, key_prefix: str) -> None:
+    chunk = item.chunk
+    badge = '<span class="badge">SYNTHETIC</span>' if chunk.synthetic else ""
+    st.markdown(
+        f'<article class="evidence-card"><div class="evidence-meta"><span>{html.escape(short(chunk.source))}{badge}</span>'
+        f'<span>PAGE {chunk.page}</span></div><p>{highlight(chunk.text, query)}</p></article>', unsafe_allow_html=True)
+    digest = hashlib.sha256(f"{chunk.id}|{key_prefix}".encode()).hexdigest()[:12]
+    st.button(f"{label}: page {chunk.page} of {short(chunk.source, 36)}", key=f"open_{digest}",
+              on_click=request_viewer, args=(chunk.source, chunk.page, tokens(query)))
+
+
+def render_result(result) -> None:
+    query = html.escape(result.query)
+    st.markdown(f'<div class="atlas"><div class="article-rule"></div><p class="kicker">Submitted question</p><h1 class="question-headline">{query}</h1></div>', unsafe_allow_html=True)
+    reading, rail = st.columns([7, 4], gap="large")
+    with reading:
+        st.markdown('<p class="kicker">Answer</p>', unsafe_allow_html=True)
+        for note in result.notices:
+            st.warning(note)
+        if result.status == "processing_error":
+            st.error(f"Search could not be completed: {result.error}. This is a processing failure, not an absence of evidence.")
+        elif result.status == "answered" and result.citation:
+            chunk = result.citation
+            badge = '<span class="badge">SYNTHETIC DEMO RECORD</span>' if chunk.synthetic else ""
+            st.markdown(
+                f'<article class="answer-copy"><p>{html.escape(result.statement)}</p></article>'
+                f'<div class="citation-line">{html.escape(chunk.institution)} · {html.escape(short(chunk.source, 60))} · page {chunk.page}{badge}</div>',
+                unsafe_allow_html=True)
+            st.markdown('<aside class="notice limitation atlas"><h2>Evidence limitation</h2><p><strong>This is an extract from the indexed records, not an accreditation decision.</strong> Read the cited page in context before relying on it.</p></aside>', unsafe_allow_html=True)
+        else:
+            reason = f" ({html.escape(result.reason)})" if result.reason else ""
+            st.markdown(f'<aside class="notice unable atlas"><h2>Unable to verify</h2><p><strong>No supporting passage answers this question in the searchable records{reason}.</strong> Try a narrower question or another institution scope. Documents without searchable text are listed in the Corpus tab.</p></aside>', unsafe_allow_html=True)
+    with rail:
+        if result.answered and result.citation:
+            st.markdown('<p class="kicker">Supporting passage</p>', unsafe_allow_html=True)
+            support = next((c for c in result.candidates if c.chunk.id == result.citation.id), None)
+            if support:
+                evidence_card(support, result.query, "Open cited page", "support")
+            others = [c for c in result.candidates if c.chunk.id != result.citation.id][:3]
+            if others:
+                st.markdown('<p class="kicker">Other retrieved passages (not used for the answer)</p>', unsafe_allow_html=True)
+                for index, item in enumerate(others):
+                    evidence_card(item, result.query, "Open page", f"other{index}")
+        elif result.candidates:
+            st.markdown('<p class="kicker">Closest passages (do not answer the question)</p>', unsafe_allow_html=True)
+            for index, item in enumerate(result.candidates[:3]):
+                evidence_card(item, result.query, "Open page", f"near{index}")
+
+
+def search_tab(rag) -> None:
+    st.markdown('<div class="atlas"><div class="section-rule"></div><p class="kicker">Ask the corpus</p><h1>Find evidence, not just documents.</h1><p class="lede">Ask about SSR, AQAR, IQAC minutes, NIRF, NBA, and the records supplied to this workspace.</p></div>', unsafe_allow_html=True)
     with st.form("evidence-question", clear_on_submit=False):
-        question = st.text_input("Ask a question about the corpus", key="question", placeholder="For example: What evidence supports faculty development activity?")
-        ask = st.form_submit_button("Ask the corpus", type="primary")
-    install_following_magnifier()
-    st.caption("Demonstration corpus. Answers are extractive and only include evidence located in supplied records.")
+        st.text_input("Ask a question about the corpus", key="question", placeholder="For example: What attendance percentage is mandatory?")
+        left, right = st.columns([1, 5])
+        left.form_submit_button("Ask the corpus", type="primary", on_click=submit_question, disabled=not rag.chunks)
+        if st.session_state.get("result") or st.session_state.get("form_message"):
+            right.form_submit_button("Clear", on_click=clear_result)
+    if st.session_state.get("form_message"):
+        st.warning(st.session_state["form_message"])
+    st.caption("Answers are extracted from the indexed records. Demonstration records are labelled SYNTHETIC. Choose an institution above to scope the search.")
 
-    if ask and question.strip():
-        st.session_state["submitted_question"] = question.strip()
-    submitted = st.session_state.get("submitted_question", "")
-
-    if submitted:
-        try:
-            with st.spinner("Matching the question to supporting evidence…"):
-                answer, evidence = rag.answer(submitted, "Hybrid + Reranker")
-        except Exception as err:
-            st.error(f"Retrieval failed: {err}")
-            answer, evidence = NO_EVIDENCE_RESPONSE, []
-        st.markdown('<div class="article-rule"></div><p class="kicker">Submitted question</p>'
-                    f'<h1 class="question-headline">{html.escape(submitted)}</h1>', unsafe_allow_html=True)
-        reading, rail = st.columns([7, 4], gap="large")
-        with reading:
-            st.markdown('<p class="kicker">Answer</p>', unsafe_allow_html=True)
-            if answer == NO_EVIDENCE_RESPONSE:
-                st.markdown('<aside class="notice unable"><h2>Unable to verify</h2><p><strong>No supporting passage was found in the supplied records.</strong> Try a narrower question, add the governing document, or inspect the corpus.</p></aside>', unsafe_allow_html=True)
-            else:
-                citation = re.search(r"\[Source: (.*?), Page: (\d+)\]$", answer)
-                fact = re.sub(r"\s*\[Source: .*?, Page: \d+\]$", "", answer)
-                citation_text = f"{citation.group(1)} · page {citation.group(2)}" if citation else "Citation unavailable"
-                st.markdown(f'<article class="answer-copy"><p>{html.escape(fact)}</p></article><div class="citation-line">EVIDENCE LINKED · {html.escape(citation_text)}</div>', unsafe_allow_html=True)
-                st.markdown('<aside class="notice limitation"><h2>Evidence limitation</h2><p><strong>This response is an extract from the indexed records, not an accreditation decision.</strong> Review the cited page in context before relying on it.</p></aside>', unsafe_allow_html=True)
-        with rail:
-            st.markdown('<p class="kicker">Supporting evidence</p>', unsafe_allow_html=True)
-            if evidence:
-                for item in evidence[:3]:
-                    evidence_card(item, submitted)
-            else:
-                st.markdown('<aside class="notice"><h2>Important notice</h2><p>No supporting evidence is available for this question.</p></aside>', unsafe_allow_html=True)
-        show_viewer(rag)
+    pending = st.session_state.pop("pending_query", None)
+    if pending:
+        scope = pending["scope"]
+        with st.spinner("Preparing search models and matching the question to evidence…"):
+            st.session_state["result"] = rag.answer(pending["query"], DEFAULT_METHOD, scope)
+    result = st.session_state.get("result")
+    if result:
+        render_result(result)
     else:
-        st.markdown('<section class="initial-state"><p class="kicker">Ready for review</p><h2>Every claim stays connected to a page.</h2><p>Submit a question to read a concise answer alongside the passages that support it.</p></section>', unsafe_allow_html=True)
+        st.markdown('<div class="atlas"><section class="initial-state"><p class="kicker">Ready for review</p><h2>Every claim stays connected to a page.</h2><p>Submit a question to read a concise answer alongside the passage that supports it.</p></section></div>', unsafe_allow_html=True)
 
-with coverage_tab:
-    st.markdown('<div class="section-rule"></div><p class="kicker">Coverage review</p><h1>Evidence coverage</h1><p class="lede">A document-led view of accreditation topics identified in the supplied corpus.</p>', unsafe_allow_html=True)
-    coverage = get_coverage(rag)
-    frame = pd.DataFrame([{ "Criterion": row["Criterion"], "Evidence": row["Evidence strength"], "Citation": row["Citation"] } for row in coverage])
-    st.dataframe(frame, use_container_width=True, hide_index=True)
-    st.markdown('<aside class="notice"><h2>Important notice</h2><p><strong>Coverage indicates located passages, not a compliance finding.</strong> Authority, currency, and applicability require reviewer judgement.</p></aside>', unsafe_allow_html=True)
 
-with evaluation_tab:
-    st.markdown(f'<div class="section-rule"></div><p class="kicker">Labeled test suite</p><h1>Evaluation</h1><p class="lede">{len(BENCHMARK)} questions: evidence-required cases and explicit no-evidence controls.</p>', unsafe_allow_html=True)
+# ---------------------------------------------------------------- coverage tab
+
+def coverage_tab(rag, scope: str) -> None:
+    st.markdown('<div class="atlas"><div class="section-rule"></div><p class="kicker">Coverage review</p><h1>Evidence coverage</h1><p class="lede">Located passages for each accreditation topic. Locating a passage is not verification: every row starts as not reviewed.</p></div>', unsafe_allow_html=True)
+    key = f"coverage::{rag.index_version}::{scope}"
+    if st.button("Run coverage review", type="primary", key="run_coverage"):
+        with st.spinner(f"Searching {len(ACCREDITATION_CRITERIA)} criteria…"):
+            st.session_state[key] = rag.criterion_coverage(scope)
+    rows = st.session_state.get(key)
+    if rows is None:
+        st.info("Run the coverage review to search the selected records for each criterion. It is not run automatically.")
+        return
+    gaps = [d for d in rag.documents if (scope == ALL_INSTITUTIONS or d.institution == scope) and d.status in ("no_text", "error")]
+    if gaps:
+        st.warning(f"{len(gaps)} document(s) in this scope have no searchable text and were not searched, so “No evidence located” may reflect an ingestion gap. See the Corpus tab.")
+    frame = pd.DataFrame([{"Criterion": r["Criterion"], "Located": r["Evidence strength"], "Review": r["Review"],
+                           "Institution": r["Institution"], "Finding": r["Finding"], "Citation": r["Citation"]} for r in rows])
+    st.dataframe(frame, width="stretch", hide_index=True)
+    cited = [r for r in rows if r["source"]]
+    if cited:
+        choice = st.selectbox("Open a cited page", [f"{r['Criterion']} — {short(r['source'], 40)} p.{r['page']}" for r in cited], key="cov_open")
+        index = [f"{r['Criterion']} — {short(r['source'], 40)} p.{r['page']}" for r in cited].index(choice)
+        row = cited[index]
+        st.button("Open cited page", key="cov_open_btn", on_click=request_viewer, args=(row["source"], int(row["page"]), tokens(row["Finding"])[:6]))
+    from exports import export_docx, export_pdf
+    export_scope = scope
+    left, right = st.columns(2)
+    left.download_button("Download evidence pack (DOCX)", export_docx(rows, export_scope), "evidence_pack.docx",
+                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    right.download_button("Download evidence pack (PDF)", export_pdf(rows, export_scope), "evidence_pack.pdf", "application/pdf")
+    alerts = review_alerts(rag, rag.index_version, scope)
+    with st.expander(f"Review alerts ({len(alerts)})"):
+        st.caption("Values that differ within one institution, flagged for human review. Not findings of non-compliance.")
+        for alert in alerts or []:
+            st.markdown(f"**{alert['level']} · {alert['institution']}** — {alert['message']}")
+        if not alerts:
+            st.write("No alerts.")
+
+
+# ---------------------------------------------------------------- evaluation tab
+
+def evaluation_tab(rag) -> None:
+    from evaluate import BENCHMARK, DEFAULT_SCOPE, METHODS, run_evaluation, summarise
+    positives = sum(1 for case in BENCHMARK if case[3] == "Evidence expected")
+    scope = DEFAULT_SCOPE if DEFAULT_SCOPE in rag.institutions else None
+    st.markdown(f'<div class="atlas"><div class="section-rule"></div><p class="kicker">Labeled test suite · maintainer tool</p><h1>Evaluation</h1><p class="lede">{positives} evidence-required questions and {len(BENCHMARK) - positives} no-evidence controls, scored separately for retrieval, answer correctness and abstention. Scope: {html.escape(scope or "all institutions")}.</p></div>', unsafe_allow_html=True)
     if st.button("Run backend evaluation", type="primary"):
-        with st.spinner("Running retrieval and citation validation…"):
-            st.session_state["evaluation"] = run_evaluation(rag)
+        with st.spinner("Running retrieval and answer checks (this can take a minute)…"):
+            st.session_state["evaluation"] = run_evaluation(rag, scope)
     evaluation = st.session_state.get("evaluation")
     if evaluation is None:
-        st.info("Run the evaluation to calculate current results. No results are invented or prefilled.")
-    else:
-        st.dataframe(evaluation, use_container_width=True, hide_index=True)
-        st.download_button("Download evaluation CSV", evaluation.to_csv(index=False), "evaluation_results.csv", "text/csv")
+        st.info("Run the evaluation to calculate current results. Nothing is prefilled.")
+        return
+    summary = summarise(evaluation)
+    table = pd.DataFrame([{"Method": METHODS[name], "Recall@5": summary[name]["recall_at_5"], "MRR": summary[name]["mrr"],
+                           "Answer correct": summary[name]["answer_correct"], "Correct abstentions": f"{summary[name]['correct_abstentions']}/{summary['negative_cases']}"}
+                          for name in METHODS])
+    st.caption(f"Run {evaluation.attrs.get('run_id', '(unsaved)')} · positive-case recall excludes the no-evidence controls.")
+    st.dataframe(table, width="stretch", hide_index=True)
+    st.dataframe(evaluation, width="stretch", hide_index=True)
+    st.download_button("Download evaluation CSV", evaluation.to_csv(index=False), f"evaluation_{evaluation.attrs.get('run_id', 'run')}.csv", "text/csv")
 
-with corpus_tab:
-    st.markdown(f'<div class="section-rule"></div><p class="kicker">Supplied records</p><h1>Corpus</h1><p class="lede">{len(sources)} documents and {len(rag.chunks)} indexed passages.</p>', unsafe_allow_html=True)
-    filter_text = st.text_input("Filter documents", placeholder="Filter by filename")
-    visible_sources = [source for source in sources if filter_text.lower() in source.lower()]
-    st.dataframe(pd.DataFrame({"Document": visible_sources}), use_container_width=True, hide_index=True)
-    st.markdown('<aside class="notice"><h2>Important notice</h2><p>Files displayed here are demonstration and supplied records. Source scans remain visually faithful when opened.</p></aside>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------------- corpus tab
+
+def rescan() -> None:
+    get_rag.clear()
+
+
+def corpus_tab(rag) -> None:
+    ok = sum(1 for d in rag.documents if d.status == "ok")
+    st.markdown(f'<div class="atlas"><div class="section-rule"></div><p class="kicker">Supplied records</p><h1>Corpus</h1><p class="lede">{len(rag.documents)} documents registered, {ok} fully searchable, {len(rag.chunks)} indexed passages. Index version {rag.index_version or "—"}.</p></div>', unsafe_allow_html=True)
+    left, right = st.columns([3, 1])
+    filter_text = left.text_input("Filter documents", placeholder="Filter by filename or institution", key="corpus_filter")
+    status_filter = right.selectbox("Status", ["All", "ok", "partial", "no_text", "error"])
+    st.button("Rescan corpus folder", on_click=rescan, help="Re-read changed PDFs and rebuild the index if the documents changed.")
+    visible = [d for d in rag.documents
+               if (filter_text.lower() in d.source.lower() or filter_text.lower() in d.institution.lower())
+               and (status_filter == "All" or d.status == status_filter)]
+    labels = {"ok": "Searchable", "partial": "Partly searchable", "no_text": "No searchable text (scan)", "error": "Unreadable"}
+    st.dataframe(pd.DataFrame([{"Document": d.source, "Institution": d.institution, "Status": labels.get(d.status, d.status),
+                                "Pages": d.pages, "Pages without text": len(d.zero_text_pages), "Passages": d.chunks,
+                                "Synthetic": "Yes" if d.synthetic else ""} for d in visible]),
+                 width="stretch", hide_index=True)
+    if visible:
+        pick = st.selectbox("Open a document", [d.source for d in visible], key="corpus_open")
+        st.button("Open first page", key="corpus_open_btn", on_click=request_viewer, args=(pick, 1, []))
+    st.markdown('<aside class="notice atlas"><h2>Important notice</h2><p>Documents marked as having no searchable text are registered but cannot be searched until they are OCR-processed; absence of evidence from them is not evidence of absence.</p></aside>', unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------- page
+
+inject_theme()
+st.markdown('<header class="masthead"><div class="wordmark">Evidence Atlas</div><p>Accreditation evidence workspace for reviewers and IQAC staff</p></header>', unsafe_allow_html=True)
+
+try:
+    with st.spinner("Loading the evidence index (cached after the first run)…"):
+        rag = get_rag(corpus_stamp())
+except Exception as error:
+    st.error(f"The evidence index could not be loaded: {error}")
+    st.button("Try again", on_click=get_rag.clear)
+    st.stop()
+
+if not rag.chunks:
+    st.warning("No searchable PDF text was found in the docs folder. Add PDFs (text-based, or OCR-processed scans) and rescan from the Corpus tab.")
+
+scope_options = [ALL_INSTITUTIONS] + rag.institutions
+scope = st.selectbox("Institution scope", scope_options, key="scope", help="Searches, coverage and exports are limited to this institution's records.")
+
+open_request = st.session_state.pop("open_viewer", None)
+if open_request:
+    st.session_state["viewer_page"] = open_request["page"]
+    source_dialog(rag, open_request["source"], open_request["page"], open_request["terms"])
+
+search, coverage, evaluation, corpus = st.tabs(["Search", "Coverage", "Evaluation", "Corpus"])
+with search:
+    search_tab(rag)
+with coverage:
+    coverage_tab(rag, scope)
+with evaluation:
+    evaluation_tab(rag)
+with corpus:
+    corpus_tab(rag)

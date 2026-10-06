@@ -1,0 +1,14 @@
+# Generated state: rebuilt from docs/ on first run
+chroma_db/
+index_cache/
+eval_runs/
+__pycache__/
+*.pyc
+tmp/
+.pytest_cache/
+# Local environments and caches
+.venv/
+.audit-venv/
+.audit-cache/
+# Editor settings contain machine-specific paths
+.vscode/

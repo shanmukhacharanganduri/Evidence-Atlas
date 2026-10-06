@@ -1,44 +1,59 @@
 # -*- coding: utf-8 -*-
-"""Ten-query evaluation for Track C: dense, BM25, hybrid+reranker, and citation-grounded answers."""
+"""Labelled benchmark: retrieval, answer correctness, citation validity and abstention, scored separately.
+
+Each run writes an immutable, run-ID-named CSV plus a JSON summary (corpus/model fingerprints) under
+eval_runs/. Retrieval recall is computed over evidence-required cases only; abstention over the
+no-evidence controls only.
+"""
 from __future__ import annotations
 
-
+import json
 import re
+import uuid
+from datetime import datetime, timezone
 
 import pandas as pd
 
-from rag_pipeline import NO_EVIDENCE_RESPONSE, ROOT, build_rag
+from rag_pipeline import MODEL_NAME, RERANKER_MODEL, ROOT, build_rag
 
-METHODS = ["Dense (Chroma)", "BM25", "Hybrid + Reranker"]
+RUNS_DIR = ROOT / "eval_runs"
+METHODS = {"Dense": "Dense (Chroma)", "BM25": "BM25", "BM25+Rerank": "BM25 + Reranker", "Hybrid": "Hybrid + Reranker"}
+REPORTED_METHOD = "Hybrid"  # what the UI uses
+# The labelled facts come from the three synthetic sample documents, so the benchmark is scoped to them.
+DEFAULT_SCOPE = "KMEC (synthetic demo)"
 
-
+# (source, page, acceptable fact fragments, questions). A statement is correct if it contains ANY fragment.
 POSITIVE_BENCHMARK_GROUPS = [
-    ("Academic_Regulations_2024.pdf", 1, [
-        "What minimum CGPA is required for graduation?", "What CGPA is needed to receive a degree?", "State the graduation CGPA requirement.", "Which CGPA threshold qualifies a student for the award of a degree?",
-    ]),
-    ("Academic_Regulations_2024.pdf", 2, [
-        "What attendance percentage is mandatory to appear in end-semester examinations?", "What is the examination attendance threshold?", "How much attendance is required for semester exams?", "State the minimum attendance rule for end-semester examinations.",
-        "What medical proof is needed for attendance condonation?", "Which document supports a medical attendance condonation request?", "What evidence is required for medical condonation?", "What proof must a student submit for medical attendance relief?",
-    ]),
-    ("Academic_Regulations_2024.pdf", 3, [
-        "Which committee reviews examination malpractice?", "Who handles examination malpractice cases?", "What body considers academic examination malpractice?", "Which committee is responsible for malpractice review?",
-    ]),
-    ("Senate_Meeting_Minutes_Nov2024.pdf", 1, [
-        "Who chaired the November 2024 Senate meeting?", "Name the chair of the November Senate meeting.", "Who presided over the 2024 November Senate session?", "Identify the Senate meeting chair recorded for November 2024.",
-    ]),
-    ("Senate_Meeting_Minutes_Nov2024.pdf", 2, [
-        "What Research Seed Grant amount was approved for faculty publishing in top journals?", "How much seed funding was approved for top-tier journal publications?", "State the approved faculty research seed grant amount.", "What publication seed grant did the Senate approve?",
-    ]),
-    ("Senate_Meeting_Minutes_Nov2024.pdf", 3, [
-        "What student-to-faculty ratio was approved for Computer Science?", "State the approved Computer Science student faculty ratio.", "Which student-faculty ratio applies to Computer Science?", "What ratio did the Senate approve for the Computer Science department?",
-    ]),
-    ("Campus_Safety_and_AntiRagging_Policy.pdf", 1, [
-        "Who is the chair of the anti-ragging committee?", "Name the anti-ragging committee chair.", "Who heads the anti-ragging committee?", "Identify the chairperson of the anti-ragging committee.",
-        "What is the anti-ragging squad duty officer contact number?", "Give the anti-ragging duty officer phone number.", "How can the anti-ragging squad duty officer be contacted?", "What contact number is listed for the anti-ragging duty officer?",
-    ]),
-    ("Campus_Safety_and_AntiRagging_Policy.pdf", 2, [
-        "What is the strict grievance resolution timeline?", "Within how many days must grievances be resolved?", "State the grievance redressal timeline.", "What resolution period applies to student grievances?",
-    ]),
+    ("Academic_Regulations_2024.pdf", 1, ["6.50"], [
+        "What minimum CGPA is required for graduation?", "What CGPA is needed to receive a degree?",
+        "State the graduation CGPA requirement.", "Which CGPA threshold qualifies a student for the award of a degree?"]),
+    ("Academic_Regulations_2024.pdf", 2, ["75%"], [
+        "What attendance percentage is mandatory to appear in end-semester examinations?", "What is the examination attendance threshold?",
+        "How much attendance is required for semester exams?", "State the minimum attendance rule for end-semester examinations."]),
+    ("Academic_Regulations_2024.pdf", 2, ["medical proof", "physician"], [
+        "What medical proof is needed for attendance condonation?", "Which document supports a medical attendance condonation request?",
+        "What evidence is required for medical condonation?", "What proof must a student submit for medical attendance relief?"]),
+    ("Academic_Regulations_2024.pdf", 3, ["Disciplinary Committee"], [
+        "Which committee reviews examination malpractice?", "Who handles examination malpractice cases?",
+        "What body considers academic examination malpractice?", "Which committee is responsible for malpractice review?"]),
+    ("Senate_Meeting_Minutes_Nov2024.pdf", 1, ["Vice-Chancellor"], [
+        "Who chaired the November 2024 Senate meeting?", "Name the chair of the November Senate meeting.",
+        "Who presided over the 2024 November Senate session?", "Identify the Senate meeting chair recorded for November 2024."]),
+    ("Senate_Meeting_Minutes_Nov2024.pdf", 2, ["5,00,000"], [
+        "What Research Seed Grant amount was approved for faculty publishing in top journals?", "How much seed funding was approved for top-tier journal publications?",
+        "State the approved faculty research seed grant amount.", "What publication seed grant did the Senate approve?"]),
+    ("Senate_Meeting_Minutes_Nov2024.pdf", 3, ["15:1"], [
+        "What student-to-faculty ratio was approved for Computer Science?", "State the approved Computer Science student faculty ratio.",
+        "Which student-faculty ratio applies to Computer Science?", "What ratio did the Senate approve for the Computer Science department?"]),
+    ("Campus_Safety_and_AntiRagging_Policy.pdf", 1, ["Raghavan"], [
+        "Who is the chair of the anti-ragging committee?", "Name the anti-ragging committee chair.",
+        "Who heads the anti-ragging committee?", "Identify the chairperson of the anti-ragging committee."]),
+    ("Campus_Safety_and_AntiRagging_Policy.pdf", 1, ["11002"], [
+        "What is the anti-ragging squad duty officer contact number?", "Give the anti-ragging duty officer phone number.",
+        "How can the anti-ragging squad duty officer be contacted?", "What contact number is listed for the anti-ragging duty officer?"]),
+    ("Campus_Safety_and_AntiRagging_Policy.pdf", 2, ["7-day", "7 days", "seven days"], [
+        "What is the strict grievance resolution timeline?", "Within how many days must grievances be resolved?",
+        "State the grievance redressal timeline.", "What resolution period applies to student grievances?"]),
 ]
 
 NO_EVIDENCE_QUESTIONS = [
@@ -47,94 +62,92 @@ NO_EVIDENCE_QUESTIONS = [
     "What is the Quantarion warp-core maintenance schedule?",
     "Which department owns the Novalux asteroid laboratory?",
     "What is the Aetherion quantum-teleportation safety code?",
+    # Realistic near-misses: plausible for a university, absent from the sample records.
+    "What is the hostel curfew time for residents?",
+    "What is the maximum tuition fee for the MBA programme?",
+    "How many days of maternity leave do staff receive?",
+    "Which body approves the university budget?",
+    "What is the library collection size?",
 ]
 
-# 40 evidence-backed questions + 5 abstention controls = 45 labelled cases.
+# (query, source, page, label, acceptable fragments)
 BENCHMARK = [
-    (query, source, page, "Evidence expected")
-    for source, page, questions in POSITIVE_BENCHMARK_GROUPS
-    for query in questions
-] + [
-    (query, "", 0, "No evidence expected") for query in NO_EVIDENCE_QUESTIONS
-]
+    (query, source, page, "Evidence expected", facts)
+    for source, page, facts, questions in POSITIVE_BENCHMARK_GROUPS for query in questions
+] + [(query, "", 0, "No evidence expected", []) for query in NO_EVIDENCE_QUESTIONS]
 
 
 def rank_of(results, source: str, page: int) -> int | None:
-    return next((rank for rank, result in enumerate(results, 1) if result.chunk.source == source and result.chunk.page == page), None)
+    return next((rank for rank, r in enumerate(results, 1) if r.chunk.source == source and r.chunk.page == page), None)
 
 
-def status(rank: int | None) -> str:
-    return f"✅ Passed / Hit @ {rank}" if rank else "⚠️ Not retrieved"
+def citation_reference_valid(result) -> bool:
+    """The cited source/page is one of the retrieved passages. This does NOT show the answer is right."""
+    return bool(result.answered and result.citation and any(
+        r.chunk.source == result.citation.source and r.chunk.page == result.citation.page for r in result.candidates))
 
 
-def citation_is_grounded(answer: str, results) -> bool:
-    match = re.search(r"\[Source: (.*?), Page: (\d+)\]$", answer)
-    if not match:
-        return False
-    source, page = match.group(1), int(match.group(2))
-    return any(item.chunk.source == source and item.chunk.page == page for item in results)
+def answer_is_correct(result, facts: list[str]) -> bool:
+    """The statement itself contains an expected fact (invented text with a valid citation fails)."""
+    statement = result.statement.lower()
+    return result.answered and any(fact.lower() in statement for fact in facts)
 
 
-def run_evaluation(rag=None) -> pd.DataFrame:
+def citation_supports_answer(result, source: str, page: int) -> bool:
+    return bool(result.answered and result.citation and result.citation.source == source and result.citation.page == page)
+
+
+def summarise(frame: pd.DataFrame) -> dict:
+    positive = frame[frame["Label"] == "Evidence expected"]
+    negative = frame[frame["Label"] == "No evidence expected"]
+    summary = {"positive_cases": len(positive), "negative_cases": len(negative)}
+    for name in METHODS:
+        summary[name] = {
+            "recall_at_5": round(float(positive[f"{name} Hit"].mean()), 4),
+            "mrr": round(float(positive[f"{name} MRR"].mean()), 4),
+            "answer_correct": round(float(positive[f"{name} Answer Correct"].mean()), 4),
+            "correct_abstentions": int(negative[f"{name} Abstained"].sum()),
+        }
+    return summary
+
+
+def run_evaluation(rag=None, institution: str | None = DEFAULT_SCOPE, save: bool = True) -> pd.DataFrame:
     rag = rag or build_rag()
     rows = []
-    for number, (query, source, page, label) in enumerate(BENCHMARK, 1):
-        dense_results  = rag.search(query, "Dense (Chroma)")
-        bm25_results   = rag.search(query, "BM25")
-        hybrid_results = rag.search(query, "Hybrid + Reranker")
-
-        dense_rank  = rank_of(dense_results,  source, page)
-        bm25_rank   = rank_of(bm25_results,   source, page)
-        hybrid_rank = rank_of(hybrid_results, source, page)
-
+    for number, (query, source, page, label, facts) in enumerate(BENCHMARK, 1):
         expected_abstention = label == "No evidence expected"
-        answer_map = {
-            "Dense": rag.answer_from_results(query, dense_results),
-            "BM25": rag.answer_from_results(query, bm25_results),
-            "Hybrid": rag.answer_from_results(query, hybrid_results),
-        }
-        valid_map = {
-            name: (answer == NO_EVIDENCE_RESPONSE if expected_abstention else citation_is_grounded(answer, evidence))
-            for name, (answer, evidence) in answer_map.items()
-        }
-        answer, answer_evidence = answer_map["BM25"]
-        abstained = answer == NO_EVIDENCE_RESPONSE
-        grounded = int(valid_map["BM25"])
-
-        rows.append({
-            "#": number,
-            "Accreditation query": query,
-            "Label": label,
-            "Expected evidence": "No evidence should be returned" if expected_abstention else f"{source}, p.{page}",
-            "Dense Hit":   int(dense_rank  is not None),
-            "BM25 Hit":    int(bm25_rank   is not None),
-            "Hybrid Hit":  int(hybrid_rank is not None),
-            "Dense MRR":   round(1.0 / dense_rank,  4) if dense_rank  else 0.0,
-            "BM25 MRR":    round(1.0 / bm25_rank,   4) if bm25_rank   else 0.0,
-            "Hybrid MRR":  round(1.0 / hybrid_rank, 4) if hybrid_rank else 0.0,
-            "Grounded Faithfulness": grounded,
-            "Dense Answer Valid": int(valid_map["Dense"]),
-            "BM25 Answer Valid": int(valid_map["BM25"]),
-            "Hybrid Answer Valid": int(valid_map["Hybrid"]),
-            "Backend Validation": "Passed" if all(valid_map.values()) else "Failed",
-            "Dense Status":   status(dense_rank),
-            "BM25 Status":    status(bm25_rank),
-            "Hybrid Status":  status(hybrid_rank),
-            "Grounded Status": ("Abstained correctly" if abstained else "Incorrectly answered") if expected_abstention else ("Citation grounded" if grounded else "Review needed"),
-        })
-
+        row = {"#": number, "Accreditation query": query, "Label": label,
+               "Expected evidence": "No evidence should be returned" if expected_abstention else f"{source}, p.{page}"}
+        for name, method in METHODS.items():
+            results = rag.search(query, method, institution=institution)
+            rank = rank_of(results, source, page) if not expected_abstention else None
+            answer = rag.answer_from_results(query, results, method, institution)
+            row[f"{name} Hit"] = int(rank is not None)
+            row[f"{name} MRR"] = round(1.0 / rank, 4) if rank else 0.0
+            row[f"{name} Answer Correct"] = int(answer_is_correct(answer, facts)) if not expected_abstention else 0
+            row[f"{name} Citation Valid"] = int(citation_reference_valid(answer))
+            row[f"{name} Cites Expected Page"] = int(citation_supports_answer(answer, source, page)) if not expected_abstention else 0
+            row[f"{name} Abstained"] = int(not answer.answered) if expected_abstention else 0
+            if name == REPORTED_METHOD:
+                row["Reported Answer"] = answer.formatted()
+                row["Reported Outcome"] = (
+                    ("Abstained correctly" if not answer.answered else "Incorrectly answered") if expected_abstention
+                    else ("Correct" if row[f"{name} Answer Correct"] else ("Abstained" if not answer.answered else "Wrong answer")))
+        rows.append(row)
     frame = pd.DataFrame(rows)
-    frame.to_csv(ROOT / "evaluation_results.csv", index=False)
+    if save:
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:6]
+        RUNS_DIR.mkdir(exist_ok=True)
+        frame.to_csv(RUNS_DIR / f"{run_id}.csv", index=False)
+        meta = {"run_id": run_id, "corpus_fingerprint": rag.fingerprint, "index_version": rag.index_version,
+                "embedding_model": MODEL_NAME, "reranker_model": RERANKER_MODEL, "institution_scope": institution,
+                "summary": summarise(frame)}
+        (RUNS_DIR / f"{run_id}.json").write_text(json.dumps(meta, indent=2), "utf-8")
+        frame.attrs["run_id"] = run_id
     return frame
 
 
 if __name__ == "__main__":
     results = run_evaluation()
-    print(f"Saved {len(results)} evaluation rows to evaluation_results.csv")
-    for method, hit_col, mrr_col in [
-        ("Dense",  "Dense Hit",  "Dense MRR"),
-        ("BM25",   "BM25 Hit",   "BM25 MRR"),
-        ("Hybrid", "Hybrid Hit", "Hybrid MRR"),
-    ]:
-        print(f"{method}: Recall@5={results[hit_col].mean():.0%}  MRR={results[mrr_col].mean():.3f}")
-    print(f"Grounded Faithfulness: {results['Grounded Faithfulness'].mean():.0%}")
+    print(f"Run {results.attrs.get('run_id')}: {len(results)} cases")
+    print(json.dumps(summarise(results), indent=2))

@@ -1,0 +1,5 @@
+{
+  "Academic_Regulations_2024.pdf": {"institution": "KMEC (synthetic demo)", "synthetic": true, "origin": "generate_sample_docs.py"},
+  "Senate_Meeting_Minutes_Nov2024.pdf": {"institution": "KMEC (synthetic demo)", "synthetic": true, "origin": "generate_sample_docs.py"},
+  "Campus_Safety_and_AntiRagging_Policy.pdf": {"institution": "KMEC (synthetic demo)", "synthetic": true, "origin": "generate_sample_docs.py"}
+}

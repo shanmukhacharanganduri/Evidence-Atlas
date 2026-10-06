@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=9.0,<10
+# Only for the opt-in browser tests (pytest -m e2e); also run: python -m playwright install chromium
+playwright>=1.50
+pytest-playwright>=0.7

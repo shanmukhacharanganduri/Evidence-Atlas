@@ -1,4 +1,4 @@
-"""Generate realistic university governance PDFs for the KMEC RAG demo."""
+"""Generate synthetic (fictional) university governance PDFs for the KMEC RAG demo. Every page footer says so."""
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -62,7 +62,7 @@ def footer(canvas, doc):
     canvas.line(0.7 * inch, 0.56 * inch, A4[0] - 0.7 * inch, 0.56 * inch)
     canvas.setFont(FONT, 8)
     canvas.setFillColor(colors.HexColor("#435466"))
-    canvas.drawString(0.7 * inch, 0.38 * inch, "KMEC University | Official Governance Record")
+    canvas.drawString(0.7 * inch, 0.38 * inch, "SYNTHETIC DEMONSTRATION RECORD - not an official document")
     canvas.drawRightString(A4[0] - 0.7 * inch, 0.38 * inch, f"Page {doc.page}")
     canvas.restoreState()
 
